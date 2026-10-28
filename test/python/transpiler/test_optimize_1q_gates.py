@@ -21,6 +21,7 @@ from qiskit.transpiler.passes import Optimize1qGates, BasisTranslator
 from qiskit.converters import circuit_to_dag
 from qiskit.circuit import Parameter, Gate
 from qiskit.circuit.library import U1Gate, U2Gate, U3Gate, UGate, PhaseGate
+from qiskit.quantum_info import Operator
 from qiskit.transpiler.exceptions import TranspilerError
 from qiskit.transpiler.target import Target
 from test import QiskitTestCase
@@ -681,6 +682,48 @@ class TestOptimize1qGatesBasis(QiskitTestCase):
         expected.append(U3Gate(0.3, 0, 0), [qr[0]])
 
         self.assertEqual(expected, result)
+
+    def test_optimize_u_runs_with_default_basis(self):
+        """Optimizing U gates preserves the unitary and produces named gates."""
+        circuit = QuantumCircuit(1)
+        circuit.append(UGate(1, 1, 1), [0])
+        circuit.append(UGate(-1, -1, -1), [0])
+        circuit.append(UGate(1, 1, 1), [0])
+
+        result = PassManager(Optimize1qGates()).run(circuit)
+
+        for instruction in result.data:
+            self.assertNotEqual(instruction.operation.name, "")
+
+        self.assertTrue(Operator(circuit).equiv(Operator(result)))
+
+    def test_optimize_u3_runs_with_u_basis(self):
+        """Optimizing U3 gates respects the basis and preserves the unitary."""
+        circuit = QuantumCircuit(1)
+        circuit.append(U3Gate(1, 1, 1), [0])
+        circuit.append(U3Gate(-1, -1, -1), [0])
+        circuit.append(U3Gate(1, 1, 1), [0])
+
+        basis = ["u", "cx"]
+        result = PassManager(Optimize1qGates(basis)).run(circuit)
+
+        output_gates = {instruction.operation.name for instruction in result.data}
+        self.assertTrue(output_gates.issubset(set(basis)))
+        self.assertTrue(Operator(circuit).equiv(Operator(result)))
+
+    def test_optimize_u2_with_u_only_target(self):
+        """A U2 gate is emitted as a U gate when the target only supports U."""
+        target = Target(num_qubits=1)
+        target.add_instruction(
+            UGate(Parameter("theta"), Parameter("phi"), Parameter("lam")), {(0,): None}
+        )
+        circuit = QuantumCircuit(1)
+        circuit.append(U2Gate(0.3, 0.4), [0])
+
+        result = PassManager(Optimize1qGates(target=target)).run(circuit)
+
+        self.assertEqual([instruction.operation.name for instruction in result.data], ["u"])
+        self.assertTrue(Operator(circuit).equiv(Operator(result)))
 
 
 if __name__ == "__main__":

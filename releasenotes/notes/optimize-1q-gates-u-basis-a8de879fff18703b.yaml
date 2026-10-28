@@ -1,0 +1,7 @@
+---
+fixes:
+  - |
+    Fixed :class:`.Optimize1qGates` emitting an invalid unnamed gate, or raising a
+    :class:`.TranspilerError`, when the gates in a run and the basis or target used different
+    names for the same gate, such as ``u`` and ``u3``.
+    See `#14970 <https://github.com/Qiskit/qiskit/issues/14970>`__.

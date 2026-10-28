@@ -23,12 +23,15 @@ from qiskit.circuit.library.standard_gates.u1 import U1Gate
 from qiskit.circuit.library.standard_gates.u2 import U2Gate
 from qiskit.circuit.library.standard_gates.u3 import U3Gate
 from qiskit.circuit import ParameterExpression
-from qiskit.circuit.gate import Gate
 from qiskit.transpiler.basepasses import TransformationPass
 from qiskit.quantum_info.quaternion import Quaternion
 from qiskit._accelerate.optimize_1q_gates import compose_u3_rust
 
 _CHOP_THRESHOLD = 1e-15
+
+# Gates that are equal up to their name are handled as u1, u2 or u3 inside the pass, and
+# only mapped to the names in the basis or target when the output gate is built.
+_NORMALIZED_NAMES = {"u1": "u1", "p": "u1", "u2": "u2", "u3": "u3", "u": "u3", "id": "u1"}
 
 
 class Optimize1qGates(TransformationPass):
@@ -63,34 +66,26 @@ class Optimize1qGates(TransformationPass):
         Raises:
             TranspilerError: if ``YZY`` and ``ZYZ`` angles do not give same rotation matrix.
         """
-        use_u = "u" in self.basis
-        use_p = "p" in self.basis
         runs = dag.collect_runs(["u1", "u2", "u3", "u", "p"])
         runs = _split_runs_on_parameters(runs)
         for run in runs:
             run_qubits = None
             if self.target is not None:
                 run_qubits = tuple(dag.find_bit(x).index for x in run[0].qargs)
-
-                if self.target.instruction_supported("p", run_qubits):
-                    right_name = "p"
-                else:
-                    right_name = "u1"
-            elif use_p:
-                right_name = "p"
-            else:
-                right_name = "u1"
+            right_name = "u1"
             right_parameters = (0, 0, 0)  # (theta, phi, lambda)
             right_global_phase = 0
             for current_node in run:
-                left_name = current_node.name
                 if (
                     getattr(current_node, "condition", None) is not None
                     or len(current_node.qargs) != 1
-                    or left_name not in ["p", "u1", "u2", "u3", "u", "id"]
+                    or current_node.name not in _NORMALIZED_NAMES
                 ):
                     raise TranspilerError("internal error")
-                if left_name in ("u1", "p"):
+                left_name = _NORMALIZED_NAMES[current_node.name]
+                if current_node.name == "id":
+                    left_parameters = (0, 0, 0)
+                elif left_name == "u1":
                     left_parameters = (0, 0, current_node.op.params[0])
                 elif left_name == "u2":
                     left_parameters = (
@@ -98,14 +93,8 @@ class Optimize1qGates(TransformationPass):
                         current_node.op.params[0],
                         current_node.op.params[1],
                     )
-                elif left_name in ("u3", "u"):
-                    left_parameters = tuple(current_node.op.params)
                 else:
-                    if use_p:
-                        left_name = "p"
-                    else:
-                        left_name = "u1"  # replace id with u1
-                    left_parameters = (0, 0, 0)
+                    left_parameters = tuple(current_node.op.params)
                 if (
                     current_node.op.definition is not None
                     and current_node.op.definition.global_phase
@@ -122,17 +111,17 @@ class Optimize1qGates(TransformationPass):
 
                 # Compose gates
                 name_tuple = (left_name, right_name)
-                if name_tuple in (("u1", "u1"), ("p", "p")):
+                if name_tuple == ("u1", "u1"):
                     # u1(lambda1) * u1(lambda2) = u1(lambda1 + lambda2)
                     right_parameters = (0, 0, right_parameters[2] + left_parameters[2])
-                elif name_tuple in (("u1", "u2"), ("p", "u2")):
+                elif name_tuple == ("u1", "u2"):
                     # u1(lambda1) * u2(phi2, lambda2) = u2(phi2 + lambda1, lambda2)
                     right_parameters = (
                         np.pi / 2,
                         right_parameters[1] + left_parameters[2],
                         right_parameters[2],
                     )
-                elif name_tuple in (("u2", "u1"), ("u2", "p")):
+                elif name_tuple == ("u2", "u1"):
                     # u2(phi1, lambda1) * u1(lambda2) = u2(phi1, lambda1 + lambda2)
                     right_name = "u2"
                     right_parameters = (
@@ -140,7 +129,7 @@ class Optimize1qGates(TransformationPass):
                         left_parameters[1],
                         right_parameters[2] + left_parameters[2],
                     )
-                elif name_tuple in (("u1", "u3"), ("u1", "u"), ("p", "u3"), ("p", "u")):
+                elif name_tuple == ("u1", "u3"):
                     # u1(lambda1) * u3(theta2, phi2, lambda2) =
                     #     u3(theta2, phi2 + lambda1, lambda2)
                     right_parameters = (
@@ -148,13 +137,10 @@ class Optimize1qGates(TransformationPass):
                         right_parameters[1] + left_parameters[2],
                         right_parameters[2],
                     )
-                elif name_tuple in (("u3", "u1"), ("u", "u1"), ("u3", "p"), ("u", "p")):
+                elif name_tuple == ("u3", "u1"):
                     # u3(theta1, phi1, lambda1) * u1(lambda2) =
                     #     u3(theta1, phi1, lambda1 + lambda2)
-                    if use_u:
-                        right_name = "u"
-                    else:
-                        right_name = "u3"
+                    right_name = "u3"
                     right_parameters = (
                         left_parameters[0],
                         left_parameters[1],
@@ -165,10 +151,7 @@ class Optimize1qGates(TransformationPass):
                     #    Rz(pi/2).Ry(pi-2*lambda).Rz(pi/2),
                     # u2(phi1, lambda1) * u2(phi2, lambda2) =
                     #    u3(pi - lambda1 - phi2, phi1 + pi/2, lambda2 + pi/2)
-                    if use_u:
-                        right_name = "u"
-                    else:
-                        right_name = "u3"
+                    right_name = "u3"
                     right_parameters = (
                         np.pi - left_parameters[2] - right_parameters[1],
                         left_parameters[1] + np.pi / 2,
@@ -181,10 +164,7 @@ class Optimize1qGates(TransformationPass):
                     # For composing u3's or u2's with u3's, use
                     # u2(phi, lambda) = u3(pi/2, phi, lambda)
                     # together with the qiskit.mapper.compose_u3 method.
-                    if use_u:
-                        right_name = "u"
-                    else:
-                        right_name = "u3"
+                    right_name = "u3"
                     # Evaluate the symbolic expressions for efficiency
                     right_parameters = Optimize1qGates.compose_u3(
                         left_parameters[0],
@@ -222,19 +202,16 @@ class Optimize1qGates(TransformationPass):
                 if (
                     not isinstance(right_parameters[0], ParameterExpression)
                     and abs(np.mod(right_parameters[0], (2 * np.pi))) < self.eps
-                    and right_name not in {"u1", "p"}
+                    and right_name != "u1"
                 ):
-                    if use_p:
-                        right_name = "p"
-                    else:
-                        right_name = "u1"
+                    right_name = "u1"
                     right_parameters = (
                         0,
                         0,
                         right_parameters[1] + right_parameters[2] + right_parameters[0],
                     )
                 # Y rotation is pi/2 or -pi/2 mod 2*pi, so the gate is a u2
-                if right_name in ("u3", "u"):
+                if right_name == "u3":
                     if not isinstance(right_parameters[0], ParameterExpression):
                         # theta = pi/2 + 2*k*pi
                         right_angle = right_parameters[0] - np.pi / 2
@@ -262,47 +239,24 @@ class Optimize1qGates(TransformationPass):
                 # u1 and lambda is 0 mod 2*pi so gate is nop (up to a global phase)
                 if (
                     not isinstance(right_parameters[2], ParameterExpression)
-                    and right_name in ("u1", "p")
+                    and right_name == "u1"
                     and abs(np.mod(right_parameters[2], 2 * np.pi)) < self.eps
                 ):
                     right_name = "nop"
 
-            if self.target is not None:
-                if right_name == "u2" and not self.target.instruction_supported("u2", run_qubits):
-                    if self.target.instruction_supported("u", run_qubits):
-                        right_name = "u"
-                    else:
-                        right_name = "u3"
-                if right_name in ("u1", "p") and not self.target.instruction_supported(
-                    right_name, run_qubits
-                ):
-                    if self.target.instruction_supported("u", run_qubits):
-                        right_name = "u"
-                    else:
-                        right_name = "u3"
-            else:
-                if right_name == "u2" and "u2" not in self.basis:
-                    if use_u:
-                        right_name = "u"
-                    else:
-                        right_name = "u3"
-                if right_name in ("u1", "p") and right_name not in self.basis:
-                    if use_u:
-                        right_name = "u"
-                    else:
-                        right_name = "u3"
+            if right_name != "nop":
+                right_name = self._output_name(right_name, run_qubits)
 
-            new_op = Gate(name="", num_qubits=1, params=[])
+            new_op = None
             if right_name == "u1":
                 new_op = U1Gate(right_parameters[2])
-            if right_name == "p":
+            elif right_name == "p":
                 new_op = PhaseGate(right_parameters[2])
-            if right_name == "u2":
+            elif right_name == "u2":
                 new_op = U2Gate(right_parameters[1], right_parameters[2])
-            if right_name == "u":
-                if "u" in self.basis:
-                    new_op = UGate(*right_parameters)
-            if right_name == "u3":
+            elif right_name == "u":
+                new_op = UGate(*right_parameters)
+            elif right_name == "u3":
                 if "u3" in self.basis:
                     new_op = U3Gate(*right_parameters)
                 else:
@@ -320,6 +274,37 @@ class Optimize1qGates(TransformationPass):
                 dag.remove_op_node(run[0])
 
         return dag
+
+    def _output_name(self, name, qubits):
+        """Map a normalized gate name (``u1``, ``u2`` or ``u3``) to the name of the output gate.
+
+        Args:
+            name (str): The normalized name of the merged gate.
+            qubits (tuple[int] | None): The qubits of the run, used when a target is set.
+
+        Returns:
+            str: The name of the gate to emit, according to the target or the basis.
+        """
+        if self.target is not None:
+
+            def supported(gate):
+                return self.target.instruction_supported(gate, qubits)
+
+            fallback = "u" if supported("u") else "u3"
+        else:
+
+            def supported(gate):
+                return gate in self.basis
+
+            fallback = "u" if "u" in self.basis else "u3"
+
+        if name == "u1":
+            if supported("p"):
+                return "p"
+            return "u1" if supported("u1") else fallback
+        if name == "u2":
+            return "u2" if supported("u2") else fallback
+        return "u" if "u" in self.basis else "u3"
 
     @staticmethod
     def compose_u3(theta1, phi1, lambda1, theta2, phi2, lambda2):
